@@ -1,4 +1,11 @@
-use nvim_oxi::{Dictionary, Function, Object};
+use nvim_oxi::{Dictionary, Function, Object, self, api::notify};
+
+
+
+fn info(msg: String) { 
+    let empty_opts = &Dictionary::new();
+    notify(&msg, nvim_oxi::api::types::LogLevel::Info, empty_opts).expect("couldn't notify");
+}
 
 #[nvim_oxi::plugin]
 fn embazeler() -> Dictionary {
@@ -12,9 +19,14 @@ fn embazeler() -> Dictionary {
         },
     );
 
-    Dictionary::from_iter([
+    let noft = Function::from_fn(info);
+
+    let dict = Dictionary::from_iter([
         ("add", Object::from(add)),
         ("multiply", Object::from(multiply)),
         ("compute", Object::from(compute)),
-    ])
+        ("notify", Object::from(noft)),
+    ]);
+    return dict
+
 }
