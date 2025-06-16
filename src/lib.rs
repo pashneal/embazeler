@@ -30,7 +30,6 @@ enum Event {
 
 type EventJSON = String;
 
-// It might be the case that we can use a native type instead?
 
 // you can design the state to be a concurrent data structure but we
 // just mutex for now
@@ -38,6 +37,7 @@ type PluginContext = Arc<Mutex<State>>;
 struct State {
     num_visits: i64,
     opened_files: HashSet<String>,
+    saved_files: HashSet<String>,
 }
 
 fn error(msg: &str) {
@@ -48,7 +48,8 @@ fn error(msg: &str) {
 
 fn info(msg: &str) {
     let empty_opts = &Dictionary::new();
-    notify(msg, nvim_oxi::api::types::LogLevel::Info, empty_opts).expect("couldn't notify");
+    let info_string = format!("embazeler: {msg}");
+    notify(&info_string, nvim_oxi::api::types::LogLevel::Info, empty_opts).expect("couldn't notify");
 }
 
 fn forward_to(event_forwarder: UnboundedSender<EventJSON>) -> Object {
@@ -58,23 +59,30 @@ fn forward_to(event_forwarder: UnboundedSender<EventJSON>) -> Object {
     Object::from(Function::from_fn(func))
 }
 
-fn file_open_handler(context: PluginContext, filename: String) {
-    info(&format!("opened_file: {filename}"))
+fn file_save_handler(context: PluginContext, filename: &str) -> Result<()> {
+    let mut state = context.lock().map_err(|e| EmbazelerError::MutexFailure(e.to_string()))?;
+    state.saved_files.insert(filename.to_owned());
+    info(&format!("saved_file: {filename}"));
+    Ok(())
+}
+
+fn file_open_handler(context: PluginContext, filename: &str) -> Result<()> {
+    let mut state = context.lock().map_err(|e| EmbazelerError::MutexFailure(e.to_string()))?;
+    state.opened_files.insert(filename.to_owned());
+    info(&format!("opened_file: {filename}"));
+    Ok(())
 }
 
 fn neovim_event_handler(context: PluginContext, event: EventJSON) -> Result<()> {
-    let event: Event =
-        serde_json::from_str(event.as_str()).map_err(|_| EmbazelerError::EventParseError(event))?;
-    match event.clone() {
-        Event::FileOpen{ filename } => file_open_handler(context.clone(), filename),
+    let result = serde_json::from_str(&event);
+    let event : Event = result.map_err(|_| EmbazelerError::EventParseError(event))?;
+
+    match &event {
+        Event::FileOpen{ filename } => file_open_handler(context.clone(), &filename)?,
+        Event::FileSave{ filename } => file_save_handler(context.clone(), &filename)?,
         _ => error("don't know how to process that yet")
     }
-    let mut state = context
-        .lock()
-        .map_err(|e| EmbazelerError::MutexFailure(e.to_string()))?;
-    state.num_visits += 1;
-    let visits = state.num_visits;
-    //info(&format!("handling event: [{visits}] with event {event:#?}"));
+
     Ok(())
 }
 
@@ -84,6 +92,7 @@ fn start_event_stream() -> UnboundedSender<EventJSON> {
     let state = State {
         num_visits: 0,
         opened_files: HashSet::new(),
+        saved_files: HashSet::new(),
     };
     let context = Arc::new(Mutex::new(state));
 
