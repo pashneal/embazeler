@@ -112,7 +112,7 @@ fn file_open_handler(filename: &str) -> Result<()> {
     Ok(())
 }
 
-// NOTE: use tokio::spawn and not nvim_oxi::schedule to kick off extra work for 
+// NOTE: use thread::spawn and not nvim_oxi::schedule to kick off extra work for 
 // anything downstream of this function or else expect a crash!
 // if you need to do something else, populate the event stream again
 fn std_thread_event_handler(state: Arc<Mutex<State>>, event_tx: UnboundedSender<EventJSON>, event : StdThreadEvent) -> Result<()> {
@@ -126,7 +126,7 @@ fn std_thread_event_handler(state: Arc<Mutex<State>>, event_tx: UnboundedSender<
 
 }
 
-// NOTE: use nvim_oxi::schedule and not tokio::spawn to kick off extra work for anything
+// NOTE: use nvim_oxi::schedule and not thread::spawn to kick off extra work for anything
 // downstream of this function. Or else you'll just crash
 fn neovim_event_handler(state: Arc<Mutex<State>>, event_tx: UnboundedSender<EventJSON>, event: NeovimEvent) -> Result<()> {
     match &event {
@@ -149,7 +149,7 @@ fn start_event_stream() -> UnboundedSender<EventJSON> {
 
     let global_state = Arc::new(Mutex::new(state));
 
-    let mut tokio_context = Context{
+    let mut std_thread_context = Context{
         state: global_state.clone(),
         event_rx: event_splitter.std_thread_events_rx,
         event_tx: event_splitter.event_stream.clone(),
@@ -161,7 +161,6 @@ fn start_event_stream() -> UnboundedSender<EventJSON> {
         event_tx: event_splitter.event_stream.clone(),
     };
 
-    //let tokio_context = Arc::new(Mutex::new(tokio_state));
     let (libuv_event_stream, mut libuv_event_sink) = mpsc::unbounded_channel::<NeovimEvent>();
 
     // we need to set up and forward a channel into the libuv async handle
@@ -201,14 +200,14 @@ fn start_event_stream() -> UnboundedSender<EventJSON> {
         }
     });
 
-    // Setup the event loop similarly for tokio events:
+    // Setup the event loop similarly for std thread events:
     let _ = thread::spawn(move || {
         loop {
-            let tokio_event = tokio_context.event_rx.blocking_recv().unwrap();
-            let state = tokio_context.state.clone();
-            let event_tx = tokio_context.event_tx.clone();
+            let std_thread_event = std_thread_context.event_rx.blocking_recv().unwrap();
+            let state = std_thread_context.state.clone();
+            let event_tx = std_thread_context.event_tx.clone();
             let _ = thread::spawn(move || { 
-                let result = std_thread_event_handler(state, event_tx, tokio_event);
+                let result = std_thread_event_handler(state, event_tx, std_thread_event);
                 match result {
                     Ok(_) => {},
                     Err(err) => {} // TODO: send error to neovim
@@ -229,19 +228,19 @@ struct EventSplitter {
 
 fn splitter() -> EventSplitter {
     let (tx, mut rx) = mpsc::unbounded_channel::<EventJSON>();
-    let (tokio_tx, tokio_rx) = mpsc::unbounded_channel::<StdThreadEvent>();
+    let (thread_tx, thread_rx) = mpsc::unbounded_channel::<StdThreadEvent>();
     let (neovim_tx, neovim_rx) = mpsc::unbounded_channel::<NeovimEvent>();
     
     let _ = thread::spawn(move || {
             loop {
                 let event_json = rx.blocking_recv().expect("expected channel to be open");
-                let tokio_result = serde_json::from_str::<StdThreadEvent>(&event_json);
+                let std_thread_result = serde_json::from_str::<StdThreadEvent>(&event_json);
                 let neovim_result = serde_json::from_str::<NeovimEvent>(&event_json);
 
-                match (tokio_result, neovim_result) {
+                match (std_thread_result, neovim_result) {
                     (Ok(_), Ok(_)) => panic!("did not expect results to be applicable to both"),
                     (Err(_), Err(_)) => panic!("couldn't process either"),
-                    (Ok(tokio_event), Err(_)) => tokio_tx.send(tokio_event).expect("couldn't send"),
+                    (Ok(std_thread_event), Err(_)) => thread_tx.send(std_thread_event).expect("couldn't send"),
                     (Err(_), Ok(neovim_event)) => neovim_tx.send(neovim_event).expect("couldn't send"),
                 };
             }
@@ -250,7 +249,7 @@ fn splitter() -> EventSplitter {
 
     EventSplitter { 
         event_stream: tx,
-        std_thread_events_rx: tokio_rx, 
+        std_thread_events_rx: thread_rx, 
         neovim_events_rx: neovim_rx,
     } 
 }
